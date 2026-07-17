@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import math
+from collections.abc import Mapping
 
 import aiohttp
 
@@ -17,6 +20,7 @@ from .const import (
     API_LOGIN,
     API_SET_VALUE,
     DOMAIN,
+    ERROR_COMMUNICATION_VALUE,
     FAN_SPEED_TABLES,
     PRESET_MODE_MAP,
     UID_ALARM_STATUS,
@@ -26,6 +30,7 @@ from .const import (
     UID_CONFIG_HVANE,
     UID_CONFIG_VVANE,
     UID_ERROR_CODE,
+    UID_ERROR_CODE_LEGACY,
     UID_FAN_SPEED,
     UID_HVANE,
     UID_RSSI,
@@ -45,6 +50,7 @@ class IntesisGateway:
         self._session = session
         self._base = f"http://{host}/api.cgi"
         self._session_id: str | None = None
+        self._auth_lock = asyncio.Lock()
         self._devices: dict = {}
         self._datapoints: dict = {}
         self._config_fan_map: dict[int, str] = {}
@@ -62,19 +68,26 @@ class IntesisGateway:
             if not await self._authenticate():
                 _LOGGER.error("Not authenticated for %s", self._host)
                 return None
-        payload = {"command": command, "data": {"sessionID": self._session_id, **kwargs}}
+        session_id = self._session_id
+        payload = {"command": command, "data": {"sessionID": session_id, **kwargs}}
         try:
             async with self._session.post(self._base, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 json_resp = await resp.json(content_type=None)
+                if not isinstance(json_resp, Mapping):
+                    _LOGGER.warning("Unexpected response from %s: %s", self._host, json_resp)
+                    return None
                 if json_resp.get("success"):
-                    return json_resp.get("data")
-                if "error" in json_resp:
-                    code = json_resp["error"].get("code")
+                    data = json_resp.get("data")
+                    return dict(data) if isinstance(data, Mapping) else None
+                error = json_resp.get("error")
+                if isinstance(error, Mapping):
+                    code = error.get("code")
                     if code in (1, 5) and _retry:
-                        self._session_id = None
+                        if self._session_id == session_id:
+                            self._session_id = None
                         if command != API_LOGIN:
                             return await self._request(command, _retry=False, **kwargs)
-                    _LOGGER.warning("API error %s: %s", code, json_resp["error"].get("message"))
+                    _LOGGER.warning("API error %s: %s", code, error.get("message"))
                     return None
                 _LOGGER.warning("Unexpected response from %s: %s", self._host, json_resp)
                 return None
@@ -83,42 +96,79 @@ class IntesisGateway:
             return None
 
     async def _authenticate(self) -> bool:
-        payload = {"command": API_LOGIN, "data": {"username": self._username, "password": self._password}}
-        try:
-            async with self._session.post(self._base, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                json_resp = await resp.json(content_type=None)
-                if json_resp.get("success"):
-                    self._session_id = json_resp["data"]["id"]["sessionID"]
-                    _LOGGER.debug("Authenticated with %s", self._host)
-                    return True
-                _LOGGER.warning("Auth failed for %s: %s", self._host, json_resp.get("error", {}).get("message", "unknown"))
-        except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
-            _LOGGER.error("Auth failed for %s: %s", self._host, exc)
-        return False
+        async with self._auth_lock:
+            if self._session_id:
+                return True
+
+            payload = {"command": API_LOGIN, "data": {"username": self._username, "password": self._password}}
+            try:
+                async with self._session.post(
+                    self._base,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    json_resp = await resp.json(content_type=None)
+                    if not isinstance(json_resp, Mapping):
+                        _LOGGER.warning("Malformed auth response from %s", self._host)
+                        return False
+
+                    data = json_resp.get("data")
+                    identity = data.get("id") if isinstance(data, Mapping) else None
+                    session_id = identity.get("sessionID") if isinstance(identity, Mapping) else None
+                    if json_resp.get("success") and isinstance(session_id, str) and session_id:
+                        self._session_id = session_id
+                        _LOGGER.debug("Authenticated with %s", self._host)
+                        return True
+
+                    error = json_resp.get("error")
+                    message = error.get("message", "unknown") if isinstance(error, Mapping) else "unknown"
+                    _LOGGER.warning("Auth failed for %s: %s", self._host, message)
+            except (aiohttp.ClientError, TimeoutError, ValueError, TypeError) as exc:
+                _LOGGER.error("Auth failed for %s: %s", self._host, exc)
+            return False
 
     async def connect(self) -> bool:
         result = await self._request(API_GET_INFO)
-        if result is None:
+        if not isinstance(result, Mapping):
             return False
-        info = result.get("info", {})
-        raw_id = info.get("sn", "")
-        device_id = raw_id.split(" ")[0] if raw_id else "unknown"
-        self._devices[device_id] = {
-            "name": info.get("ownSSID", f"Intesis_{device_id}"),
-            "model": info.get("deviceModel", ""),
-            "fw": info.get("wlanFwVersion", ""),
-        }
+        info = result.get("info")
+        if not isinstance(info, Mapping):
+            return False
+        raw_id = info.get("sn")
+        device_id = raw_id.split(maxsplit=1)[0] if isinstance(raw_id, str) and raw_id.strip() else self._host
+
         dp_result = await self._request(API_GET_DP)
-        if dp_result:
-            for dp in dp_result.get("dp", {}).get("datapoints", []):
-                self._datapoints[dp["uid"]] = dp
-            self._parse_config_datapoints()
+        if not isinstance(dp_result, Mapping):
+            return False
+        dp_container = dp_result.get("dp")
+        datapoints = dp_container.get("datapoints") if isinstance(dp_container, Mapping) else None
+        if not isinstance(datapoints, list):
+            return False
+
+        parsed_datapoints: dict[int, dict] = {}
+        for datapoint in datapoints:
+            if not isinstance(datapoint, Mapping):
+                continue
+            uid = self._as_int(datapoint.get("uid"))
+            if uid is None:
+                continue
+            parsed_datapoints[uid] = dict(datapoint)
+        if not parsed_datapoints:
+            return False
+
+        self._devices[device_id] = {
+            "name": info.get("ownSSID") if isinstance(info.get("ownSSID"), str) else f"Intesis_{device_id}",
+            "model": info.get("deviceModel") if isinstance(info.get("deviceModel"), str) else "",
+            "fw": info.get("wlanFwVersion") if isinstance(info.get("wlanFwVersion"), str) else "",
+        }
+        self._datapoints = parsed_datapoints
+        self._parse_config_datapoints()
         return True
 
     def _parse_config_datapoints(self) -> None:
         self._has_climate_working_mode = UID_CLIMATE_WORKING_MODE in self._datapoints
         self._has_alarm_status = UID_ALARM_STATUS in self._datapoints
-        self._has_error_code = UID_ERROR_CODE in self._datapoints or 144 in self._datapoints
+        self._has_error_code = UID_ERROR_CODE in self._datapoints or UID_ERROR_CODE_LEGACY in self._datapoints
         self._has_rssi = UID_RSSI in self._datapoints
         self._has_aquarea_cool = UID_AQUAREA_COOL_CONSUMPTION in self._datapoints
         self._has_aquarea_heat = UID_AQUAREA_HEAT_CONSUMPTION in self._datapoints
@@ -127,28 +177,25 @@ class IntesisGateway:
 
         vvane_cfg = self._datapoints.get(UID_CONFIG_VVANE)
         vvane_dp = self._datapoints.get(UID_VVANE)
-        self._config_vvane_list = []
-        if vvane_dp and "descr" in vvane_dp:
-            states = vvane_dp["descr"].get("states", [])
-            if states:
-                self._config_vvane_list = states
-        if not self._config_vvane_list and vvane_cfg and "descr" in vvane_cfg:
-            self._config_vvane_list = vvane_cfg["descr"].get("states", [])
+        self._config_vvane_list = self._get_states(vvane_dp) or self._get_states(vvane_cfg)
 
         hvane_cfg = self._datapoints.get(UID_CONFIG_HVANE)
         hvane_dp = self._datapoints.get(UID_HVANE)
-        self._config_hvane_list = []
-        if hvane_dp and "descr" in hvane_dp:
-            states = hvane_dp["descr"].get("states", [])
-            if states:
-                self._config_hvane_list = states
-        if not self._config_hvane_list and hvane_cfg and "descr" in hvane_cfg:
-            self._config_hvane_list = hvane_cfg["descr"].get("states", [])
+        self._config_hvane_list = self._get_states(hvane_dp) or self._get_states(hvane_cfg)
+
+    def _get_states(self, datapoint: object) -> list[int]:
+        if not isinstance(datapoint, Mapping):
+            return []
+        descr = datapoint.get("descr")
+        if not isinstance(descr, Mapping) or not isinstance(descr.get("states"), list):
+            return []
+        return [state for item in descr["states"] if (state := self._as_int(item)) is not None]
 
     def _get_fan_map(self) -> dict[int, str]:
-        if UID_FAN_SPEED not in self._datapoints:
+        fan_datapoint = self._datapoints.get(UID_FAN_SPEED)
+        fan_values = sorted(self._get_states(fan_datapoint))
+        if not fan_values:
             return {}
-        fan_values = sorted(self._datapoints[UID_FAN_SPEED]["descr"]["states"])
         device_model = self._devices.get(self.device_id, {}).get("model", "")
         if 0 not in fan_values and "MH-AC-WIFI" in device_model:
             fan_values = [0] + fan_values
@@ -159,17 +206,75 @@ class IntesisGateway:
         labels = ["auto", "low", "medium", "high", "max"]
         return {s: labels[i] if i < len(labels) else f"speed_{s}" for i, s in enumerate(fan_values)}
 
+    @staticmethod
+    def _as_int(value: object) -> int | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value) if math.isfinite(value) and value.is_integer() else None
+        if isinstance(value, str):
+            try:
+                return int(value.strip())
+            except ValueError:
+                return None
+        return None
+
+    def _in_range(self, uid: int, value: int) -> bool:
+        if uid in (UID_ERROR_CODE, UID_ERROR_CODE_LEGACY) and value == ERROR_COMMUNICATION_VALUE:
+            return True
+        dp = self._datapoints.get(uid)
+        if not isinstance(dp, Mapping):
+            return True
+        descr = dp.get("descr")
+        if not isinstance(descr, Mapping):
+            return True
+
+        minimum = self._as_int(descr.get("minValue"))
+        maximum = self._as_int(descr.get("maxValue"))
+        if minimum is None or maximum is None or minimum <= maximum:
+            if minimum is not None and value < minimum:
+                return False
+            if maximum is not None and value > maximum:
+                return False
+
+        states = descr.get("states")
+        if isinstance(states, (list, tuple, set, frozenset)):
+            valid_states = {state for item in states if (state := self._as_int(item)) is not None}
+            if valid_states and value not in valid_states:
+                return False
+        return True
+
+    def _poll_item(self, item: object) -> tuple[int, int] | None:
+        if not isinstance(item, Mapping):
+            return None
+        uid = self._as_int(item.get("uid"))
+        value = self._as_int(item.get("value"))
+        status = self._as_int(item.get("status", 0))
+        if uid is None or value is None or status != 0 or not self._in_range(uid, value):
+            return None
+        return uid, value
+
     async def poll_values(self) -> dict[int, int]:
         result = await self._request(API_GET_VALUE, uid="all")
-        if result is None:
+        if not isinstance(result, Mapping):
             return {}
         values = {}
         dpval = result.get("dpval", [])
         if isinstance(dpval, list):
             for item in dpval:
-                values[item["uid"]] = item["value"]
-        elif isinstance(dpval, dict):
-            values[dpval["uid"]] = dpval["value"]
+                parsed = self._poll_item(item)
+                if parsed is not None:
+                    uid, value = parsed
+                    values[uid] = value
+        elif isinstance(dpval, Mapping):
+            parsed = self._poll_item(dpval)
+            if parsed is not None:
+                uid, value = parsed
+                values[uid] = value
+        if UID_ERROR_CODE not in values and UID_ERROR_CODE_LEGACY in values:
+            values[UID_ERROR_CODE] = values[UID_ERROR_CODE_LEGACY]
         return values
 
     async def set_value(self, uid: int, value: int) -> bool:

@@ -28,7 +28,10 @@ UID_AQUAREA_COOL_CONSUMPTION = 81
 UID_AQUAREA_HEAT_CONSUMPTION = 82
 UID_ALARM_STATUS = 14
 UID_ERROR_CODE = 15
+UID_ERROR_CODE_LEGACY = 144
 UID_RSSI = 60002
+
+ERROR_COMMUNICATION_VALUE = 65535
 
 MODE_MAP = {
     0: "auto",
@@ -110,7 +113,7 @@ ERROR_MAP = {
     236: {"code": "H70", "desc": "Indoor backup heater OLP abnormality"},
     237: {"code": "F48", "desc": "Outdoor EVA outlet temperature sensor abnormality"},
     238: {"code": "F49", "desc": "Outdoor bypass outlet temperature sensor abnormality"},
-    65535: {"code": "N/A", "desc": "Communication error between PA-IntesisHome"},
+    ERROR_COMMUNICATION_VALUE: {"code": "N/A", "desc": "Communication error between PA-IntesisHome"},
 }
 
 SCAN_INTERVAL = timedelta(seconds=6)

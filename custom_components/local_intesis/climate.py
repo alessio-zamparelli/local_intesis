@@ -7,9 +7,6 @@ from homeassistant.components.climate import (
     ClimateEntity,
     ClimateEntityFeature,
     HVACMode,
-    PRESET_BOOST,
-    PRESET_COMFORT,
-    PRESET_ECO,
 )
 from homeassistant.const import (
     ATTR_TEMPERATURE,
@@ -27,7 +24,6 @@ from .const import (
     HVAC_MODE_REVERSE,
     MODE_MAP,
     MODE_REVERSE,
-    PRESET_MODE_MAP,
     SCAN_INTERVAL,
     UID_ALARM_STATUS,
     UID_AQUAREA_COOL_CONSUMPTION,
@@ -82,12 +78,13 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities: AddE
         update_method=_async_update,
         update_interval=SCAN_INTERVAL,
     )
-    await coordinator.async_refresh()
+    await coordinator.async_config_entry_first_refresh()
 
     async_add_entities([LocalIntesisClimate(coordinator, gateway)])
 
 
 class LocalIntesisClimate(ClimateEntity):
+    _attr_should_poll = False
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_precision = 1
     _attr_target_temperature_step = 1
@@ -98,6 +95,7 @@ class LocalIntesisClimate(ClimateEntity):
         self.coordinator = coordinator
         self._gateway = gateway
         self._local_values: dict[int, int] = {}
+        self._sync_task: asyncio.Task[None] | None = None
         self._attr_unique_id = f"{DOMAIN}_{gateway.device_id}"
         self._attr_device_info = {
             "identifiers": {(DOMAIN, gateway.device_id)},
@@ -122,7 +120,15 @@ class LocalIntesisClimate(ClimateEntity):
             self._attr_preset_modes = gateway.preset_modes
 
     async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
         self.async_on_remove(self.coordinator.async_add_listener(self._handle_coordinator_update))
+
+    async def async_will_remove_from_hass(self) -> None:
+        if self._sync_task is not None:
+            self._sync_task.cancel()
+            self._sync_task = None
+        self._local_values.clear()
+        await super().async_will_remove_from_hass()
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -140,14 +146,23 @@ class LocalIntesisClimate(ClimateEntity):
         self._local_values[uid] = value
 
     async def _schedule_sync(self, delay: float = 1.5) -> None:
+        if self._sync_task is not None:
+            self._sync_task.cancel()
+
         async def _do_sync():
             try:
                 await asyncio.sleep(delay)
                 await self.coordinator.async_refresh()
-            finally:
-                self._local_values.clear()
+            except asyncio.CancelledError:
+                return
 
-        asyncio.create_task(_do_sync())
+            if self._sync_task is task:
+                self._local_values.clear()
+                self._sync_task = None
+                self.async_write_ha_state()
+
+        task = self.hass.async_create_task(_do_sync())
+        self._sync_task = task
 
     @property
     def current_temperature(self) -> float | None:
@@ -235,8 +250,8 @@ class LocalIntesisClimate(ClimateEntity):
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         val = self._gateway.get_preset_value(preset_mode)
         if val is not None:
-            await self._gateway.set_value(UID_CLIMATE_WORKING_MODE, val)
-            self._optimistic_set(UID_CLIMATE_WORKING_MODE, val)
+            if await self._gateway.set_value(UID_CLIMATE_WORKING_MODE, val):
+                self._optimistic_set(UID_CLIMATE_WORKING_MODE, val)
         self.async_write_ha_state()
         await self._schedule_sync()
 
@@ -275,22 +290,23 @@ class LocalIntesisClimate(ClimateEntity):
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         if hvac_mode == HVACMode.OFF:
-            await self._gateway.set_value(UID_POWER, 0)
-            self._optimistic_set(UID_POWER, 0)
+            if await self._gateway.set_value(UID_POWER, 0):
+                self._optimistic_set(UID_POWER, 0)
         else:
             ih_mode = HVAC_MODE_REVERSE.get(hvac_mode)
             if ih_mode:
                 uid = MODE_REVERSE.get(ih_mode)
                 if uid is not None:
-                    await self._gateway.set_value(UID_POWER, 1)
-                    await self._gateway.set_value(UID_MODE, uid)
-                    self._optimistic_set(UID_POWER, 1)
-                    self._optimistic_set(UID_MODE, uid)
+                    if await self._gateway.set_value(UID_POWER, 1):
+                        self._optimistic_set(UID_POWER, 1)
+                    if await self._gateway.set_value(UID_MODE, uid):
+                        self._optimistic_set(UID_MODE, uid)
                     # Re-send setpoint - some devices reset it on mode change
                     target = self.target_temperature
                     if target is not None:
-                        await self._gateway.set_value(UID_SETPOINT, int(target * 10))
-                        self._optimistic_set(UID_SETPOINT, int(target * 10))
+                        target_value = int(target * 10)
+                        if await self._gateway.set_value(UID_SETPOINT, target_value):
+                            self._optimistic_set(UID_SETPOINT, target_value)
         self.async_write_ha_state()
         await self._schedule_sync()
 
@@ -298,16 +314,16 @@ class LocalIntesisClimate(ClimateEntity):
         temp = kwargs.get(ATTR_TEMPERATURE)
         if temp is not None:
             val = int(temp * 10)
-            await self._gateway.set_value(UID_SETPOINT, val)
-            self._optimistic_set(UID_SETPOINT, val)
+            if await self._gateway.set_value(UID_SETPOINT, val):
+                self._optimistic_set(UID_SETPOINT, val)
         self.async_write_ha_state()
         await self._schedule_sync()
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         val = self._gateway.get_fan_value(fan_mode)
         if val is not None:
-            await self._gateway.set_value(UID_FAN_SPEED, val)
-            self._optimistic_set(UID_FAN_SPEED, val)
+            if await self._gateway.set_value(UID_FAN_SPEED, val):
+                self._optimistic_set(UID_FAN_SPEED, val)
         self.async_write_ha_state()
         await self._schedule_sync()
 
@@ -330,23 +346,23 @@ class LocalIntesisClimate(ClimateEntity):
             hvane_val = VANE_REVERSE.get("swing", 10)
         if self._gateway.supports_vvane():
             if vvane_val in self._gateway.vvane_list or not self._gateway.vvane_list:
-                await self._gateway.set_value(UID_VVANE, vvane_val)
-                self._optimistic_set(UID_VVANE, vvane_val)
+                if await self._gateway.set_value(UID_VVANE, vvane_val):
+                    self._optimistic_set(UID_VVANE, vvane_val)
         if self._gateway.supports_hvane():
             if hvane_val in self._gateway.hvane_list or not self._gateway.hvane_list:
-                await self._gateway.set_value(UID_HVANE, hvane_val)
-                self._optimistic_set(UID_HVANE, hvane_val)
+                if await self._gateway.set_value(UID_HVANE, hvane_val):
+                    self._optimistic_set(UID_HVANE, hvane_val)
         self.async_write_ha_state()
         await self._schedule_sync()
 
     async def async_turn_on(self) -> None:
-        await self._gateway.set_value(UID_POWER, 1)
-        self._optimistic_set(UID_POWER, 1)
+        if await self._gateway.set_value(UID_POWER, 1):
+            self._optimistic_set(UID_POWER, 1)
         self.async_write_ha_state()
         await self._schedule_sync()
 
     async def async_turn_off(self) -> None:
-        await self._gateway.set_value(UID_POWER, 0)
-        self._optimistic_set(UID_POWER, 0)
+        if await self._gateway.set_value(UID_POWER, 0):
+            self._optimistic_set(UID_POWER, 0)
         self.async_write_ha_state()
         await self._schedule_sync()
