@@ -1,9 +1,12 @@
-from datetime import timedelta
-
 DOMAIN = "local_intesis"
 
 DEFAULT_USERNAME = "admin"
 DEFAULT_PASSWORD = "admin"
+
+CONF_SCAN_INTERVAL = "scan_interval"
+DEFAULT_SCAN_INTERVAL = 300
+MIN_SCAN_INTERVAL = 6
+MAX_SCAN_INTERVAL = 300
 
 API_LOGIN = "login"
 API_GET_INFO = "getinfo"
@@ -115,5 +118,3 @@ ERROR_MAP = {
     238: {"code": "F49", "desc": "Outdoor bypass outlet temperature sensor abnormality"},
     ERROR_COMMUNICATION_VALUE: {"code": "N/A", "desc": "Communication error between PA-IntesisHome"},
 }
-
-SCAN_INTERVAL = timedelta(seconds=6)

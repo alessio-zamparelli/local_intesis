@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 
 from homeassistant.components.climate import (
     ClimateEntity,
@@ -18,13 +19,14 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from . import IntesisGateway
 from .const import (
+    CONF_SCAN_INTERVAL,
+    DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     ERROR_MAP,
     HVAC_MODE_MAP,
     HVAC_MODE_REVERSE,
     MODE_MAP,
     MODE_REVERSE,
-    SCAN_INTERVAL,
     UID_ALARM_STATUS,
     UID_AQUAREA_COOL_CONSUMPTION,
     UID_AQUAREA_HEAT_CONSUMPTION,
@@ -71,12 +73,13 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities: AddE
             raise UpdateFailed("No data from gateway")
         return values
 
+    scan_interval = entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
     coordinator = DataUpdateCoordinator(
         hass,
         _LOGGER,
         name=DOMAIN,
         update_method=_async_update,
-        update_interval=SCAN_INTERVAL,
+        update_interval=timedelta(seconds=scan_interval),
     )
     await coordinator.async_config_entry_first_refresh()
 
