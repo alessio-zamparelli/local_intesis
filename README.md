@@ -34,17 +34,17 @@ Zero dependencies. No pyintesishome, no pip packages, nothing to break. Four eas
 - Power consumption tracking: cooling and heating kW usage reported as state attributes
 - Outdoor temperature, alarm status, error codes with descriptions, and signal strength (RSSI) as state attributes
 - Automatic discovery of your device's capabilities - only shows what your AC actually supports
-- Polls every 6 seconds for snappy updates
+- Configurable polling interval (default 30 seconds) for snappy updates
 - Optimistic updates - your commands take effect instantly while the integration syncs in the background
 - Supports models: DK-RC-WIFI-1B, FJ-RC-WIFI-1B, FJ-AC-WIFI-1B, MH-AC-WIFI-1 (any IntesisHome gateway with the local HTTP API should work)
 
 ## How it works
 
-The integration connects directly to your IntesisHome gateway over HTTP on port 80. It logs in, discovers what datapoints your AC exposes, and maps them to Home Assistant climate controls. Polling happens every 6 seconds. Commands are optimistic - the UI updates immediately and the background sync confirms the change.
+The integration connects directly to your IntesisHome gateway over HTTP on port 80. It logs in, discovers what datapoints your AC exposes, and maps them to Home Assistant climate controls. Polling happens at a configurable interval (default 30 seconds). Commands are optimistic - the UI updates immediately and the background sync confirms the change.
 
 ## Installation
 
-- Via HACS as a custom repository: add `https://github.com/anomalyco/local_intesis` as a custom repository, search for Local Intesis, and install
+- Via HACS as a custom repository: add `https://github.com/teamsuperpanda/local_intesis` as a custom repository, search for Local Intesis, and install
 - Manual: copy the `custom_components/local_intesis` directory into your Home Assistant `custom_components` folder, then restart
 
 ## Configuration
@@ -53,6 +53,8 @@ After installing and restarting Home Assistant, add the integration via Settings
 
 - The IP address or hostname of your IntesisHome gateway
 - Username and password (default is admin/admin on most gateways)
+
+The polling interval can be changed after setup from the integration's Configure option in Home Assistant (Settings > Devices & Services > Local Intesis > Configure).
 
 ## Troubleshooting
 

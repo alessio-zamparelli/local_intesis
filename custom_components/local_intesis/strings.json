@@ -18,5 +18,16 @@
     "abort": {
       "already_configured": "This gateway is already configured."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Local Intesis Options",
+        "description": "Set how often (in seconds) the gateway is polled for updates.",
+        "data": {
+          "scan_interval": "Polling interval (seconds)"
+        }
+      }
+    }
   }
 }

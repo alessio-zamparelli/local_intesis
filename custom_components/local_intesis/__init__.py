@@ -19,9 +19,11 @@ from .const import (
     API_GET_VALUE,
     API_LOGIN,
     API_SET_VALUE,
+    CONF_SCAN_INTERVAL,
     DOMAIN,
     ERROR_COMMUNICATION_VALUE,
     FAN_SPEED_TABLES,
+    MIN_SCAN_INTERVAL,
     PRESET_MODE_MAP,
     UID_ALARM_STATUS,
     UID_AQUAREA_COOL_CONSUMPTION,
@@ -382,6 +384,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    if entry.version == 1:
+        new_options = dict(entry.options)
+        new_options.setdefault(CONF_SCAN_INTERVAL, MIN_SCAN_INTERVAL)
+        hass.config_entries.async_update_entry(
+            entry, options=new_options, version=2
+        )
+    return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
